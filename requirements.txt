@@ -1,0 +1,8 @@
+flask
+langchain
+langchain-google-genai
+langchain-pinecone
+google-generativeai
+python-dotenv
+pinecone-client
+gunicorn 
