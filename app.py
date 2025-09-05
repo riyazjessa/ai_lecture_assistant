@@ -1,29 +1,29 @@
 import os
-import datetime
+import streamlit as st
 from dotenv import load_dotenv
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_pinecone import PineconeVectorStore
 from langchain.prompts import PromptTemplate
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 
-# Load environment variables from .env file
+# Load environment variables (for local testing)
 load_dotenv()
 
-# --- FLASK APP INITIALIZATION ---
-app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY")
+# --- PAGE CONFIGURATION ---
+st.set_page_config(page_title="AI Lecture Assistant", layout="wide")
+st.title("🎓 AI Lecture Assistant")
 
-# --- LANGCHAIN & DB SETUP (Done once on startup) ---
-embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-pinecone_vector_store = PineconeVectorStore.from_existing_index(
-    index_name=os.environ.get("PINECONE_INDEX_NAME"),
-    embedding=embeddings
-)
-
-def create_qa_chain():
-    """Creates the question-answering chain."""
+# --- LANGCHAIN & DB SETUP ---
+# Note: For deployment, you will set these as secrets in Streamlit Cloud
+@st.cache_resource
+def get_qa_chain():
+    """Create and cache the QA chain to avoid reloading on every interaction."""
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+    pinecone_vector_store = PineconeVectorStore.from_existing_index(
+        index_name=os.environ.get("PINECONE_INDEX_NAME"),
+        embedding=embeddings
+    )
     model = ChatGoogleGenerativeAI(model="gemini-2.5-pro", temperature=0.4)
     prompt_template = """
     You are an expert price action trader. Your task is to provide a comprehensive and detailed answer to the question based *only* on the provided context from lecture transcriptions, provide the context and all other relevant information.
@@ -32,66 +32,43 @@ def create_qa_chain():
     If the answer is not found in the context, state that clearly. If you use any external knowledge state it clearly and focus on Al Brooks price action.
 
 
-    CONTEXT:
-    {context}
-
-    QUESTION:
-    {input}
-
-    DETAILED ANSWER:
+    CONTEXT:\n{context}\n\nQUESTION:\n{input}\n\nDETAILED ANSWER:
     """
     prompt = PromptTemplate.from_template(prompt_template)
     qa_chain = create_stuff_documents_chain(model, prompt)
     retriever = pinecone_vector_store.as_retriever(search_kwargs={"k": 7})
     return create_retrieval_chain(retriever, qa_chain)
 
-qa_chain = create_qa_chain()
+chain = get_qa_chain()
 
-# --- WEB ROUTES ---
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-        if username == os.environ.get("APP_USERNAME") and password == os.environ.get("APP_PASSWORD"):
-            session['username'] = username
-            return redirect(url_for('home'))
-        else:
-            return "Invalid credentials", 401
-    return render_template('login.html')
+# --- SESSION STATE MANAGEMENT ---
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-@app.route('/')
-def home():
-    if 'username' not in session:
-        return redirect(url_for('login'))
-    return render_template('index.html')
+# Display chat messages from history on app rerun
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
-@app.route('/logout')
-def logout():
-    session.pop('username', None)
-    return redirect(url_for('login'))
+# --- CHAT INPUT ---
+if prompt := st.chat_input("Ask a question about your lectures..."):
+    # Add user message to chat history
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    # Display user message in chat message container
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
-@app.route('/ask', methods=['POST'])
-def ask():
-    if 'username' not in session:
-        return jsonify({"error": "Unauthorized"}), 401
-
-    user_query = request.json.get('question')
-    if not user_query:
-        return jsonify({"error": "No question provided"}), 400
-
-    # --- LOGGING USAGE ---
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"LOG: User='{session['username']}', Timestamp='{timestamp}', Query='{user_query}'")
-    # This print statement will appear in Render's log stream.
-
-    try:
-        response = qa_chain.invoke({"input": user_query})
-        return jsonify({"answer": response["answer"]})
-    except Exception as e:
-        print(f"ERROR: {e}")
-        return jsonify({"error": "An error occurred while generating the answer."}), 500
-
-if __name__ == '__main__':
-    # This runs the app locally for testing
-    app.run(debug=True)
+    # Display assistant response in chat message container
+    with st.chat_message("assistant"):
+        message_placeholder = st.empty()
+        with st.spinner("Thinking..."):
+            try:
+                response = chain.invoke({"input": prompt})
+                full_response = response["answer"]
+                message_placeholder.markdown(full_response)
+            except Exception as e:
+                full_response = f"An error occurred: {e}"
+                message_placeholder.markdown(full_response)
+    
+    # Add assistant response to chat history
+    st.session_state.messages.append({"role": "assistant", "content": full_response})
